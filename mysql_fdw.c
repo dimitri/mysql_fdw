@@ -630,7 +630,33 @@ mysqlIterateForeignScan(ForeignScanState *node)
 				/* special case empty string */
 				values[x] = "";
 			else
-				values[x] = row[x];
+			{
+				if (pg_verifymbstr(row[x], lengths[x], true))
+					values[x] = row[x];
+				else
+				{
+					int			l = pg_encoding_mblen(GetDatabaseEncoding(), row[x]);
+					char		buf[8 * 5 + 1];
+					char	   *p = buf;
+					int			j, jlimit;
+
+					jlimit = Min(l, lengths[x]);
+					jlimit = Min(jlimit, 8);	/* prevent buffer overrun */
+
+					for (j = 0; j < jlimit; j++)
+					{
+						p += sprintf(p, "0x%02x", (unsigned char) row[x][j]);
+						if (j < jlimit - 1)
+							p += sprintf(p, " ");
+					}
+					ereport(WARNING,
+							(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+							 errmsg("invalid byte sequence for encoding \"%s\": %s",
+									GetDatabaseEncodingName(),
+									row[x])));
+					values[x] = NULL;
+				}
+			}
 		}
 
 		tuple = BuildTupleFromCStrings(
