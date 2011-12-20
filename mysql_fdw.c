@@ -448,7 +448,7 @@ mysqlPlanForeignScan(Oid foreigntableid, PlannerInfo *root, RelOptInfo *baserel)
 	 *
 	 * We assume we're given a query that does return data (SELECT).
 	 */
-	result = mysql_store_result(conn);
+	result = mysql_use_result(conn);
 
 	if (result == NULL)
 	{
@@ -597,7 +597,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 		 *
 		 * We assume we're given a query that does return data (SELECT).
 		 */
-		festate->result = mysql_store_result(festate->conn);
+		festate->result = mysql_use_result(festate->conn);
 
 		if (festate->result == NULL)
 		{
