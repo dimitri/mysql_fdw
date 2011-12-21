@@ -578,6 +578,8 @@ mysqlIterateForeignScan(ForeignScanState *node)
 
 	MySQLFdwExecutionState *festate = (MySQLFdwExecutionState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	AttInMetadata *meta =
+		TupleDescGetAttInMetadata(node->ss.ss_currentRelation->rd_att);
 
 	/* Execute the query, if required */
 	if (!festate->result)
@@ -626,26 +628,41 @@ mysqlIterateForeignScan(ForeignScanState *node)
 		Datum	   *dvalues;
 		bool	   *nulls;
 		unsigned long    *lengths;
-		int				  x;
+		int				  x, y;
 
 		lengths = mysql_fetch_lengths(festate->result);
 		dvalues = (Datum *) palloc(festate->num_fields * sizeof(Datum));
 		nulls = (bool *) palloc(festate->num_fields * sizeof(bool));
 
-		for (x = 0; x < festate->num_fields; x++)
+		for (x = y = 0; x < festate->num_fields; x++, y++)
 		{
+			/* Handle dropped attributes by setting to NULL */
+			if (meta->tupdesc->attrs[y]->attisdropped)
+			{
+				dvalues[y] = (Datum) 0;
+				nulls[y] = true;
+				y++;
+			}
+
 			if (lengths[x] == 0 && row[x] != NULL)
 			{
 				/* special case empty string */
-				nulls[x] = false;
-				dvalues[x] = CStringGetTextDatum("");
+				nulls[y] = false;
+				dvalues[y] = InputFunctionCall(&meta->attinfuncs[y],
+											   "",
+											   meta->attioparams[y],
+											   meta->atttypmods[y]);
+
 			}
 			else
 			{
 				if (pg_verifymbstr(row[x], lengths[x], true))
 				{
-					nulls[x] = false;
-					dvalues[x] = CStringGetTextDatum(row[x]);
+					nulls[y] = false;
+					dvalues[y] = InputFunctionCall(&meta->attinfuncs[y],
+												   row[x],
+												   meta->attioparams[y],
+												   meta->atttypmods[y]);
 				}
 				else
 				{
@@ -668,7 +685,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 							 errmsg("invalid byte sequence for encoding \"%s\": %s",
 									GetDatabaseEncodingName(),
 									row[x])));
-					nulls[x] = true;
+					nulls[y] = true;
 				}
 			}
 		}
