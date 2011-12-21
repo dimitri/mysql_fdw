@@ -644,7 +644,13 @@ mysqlIterateForeignScan(ForeignScanState *node)
 				y++;
 			}
 
-			if (lengths[x] == 0 && row[x] != NULL)
+			if (row[x] == NULL)
+			{
+				/* we have a NULL value here */
+				dvalues[y] = (Datum) 0;
+				nulls[y] = true;
+			}
+			else if (lengths[x] == 0)
 			{
 				/* special case empty string */
 				nulls[y] = false;
@@ -652,7 +658,6 @@ mysqlIterateForeignScan(ForeignScanState *node)
 											   "",
 											   meta->attioparams[y],
 											   meta->atttypmods[y]);
-
 			}
 			else
 			{
@@ -685,6 +690,8 @@ mysqlIterateForeignScan(ForeignScanState *node)
 							 errmsg("invalid byte sequence for encoding \"%s\": %s",
 									GetDatabaseEncodingName(),
 									row[x])));
+
+					dvalues[y] = (Datum) 0;
 					nulls[y] = true;
 				}
 			}
