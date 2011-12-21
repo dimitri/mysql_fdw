@@ -83,10 +83,10 @@ static struct MySQLFdwOption valid_options[] =
 
 typedef struct MySQLFdwExecutionState
 {
-	MYSQL		*conn;
-	MYSQL_RES	*result;
-	char		*query;
-	unsigned int num_fields;
+	MYSQL		*conn;			/* MySQL connection object */
+	MYSQL_RES	*result;		/* MySQL result set handler */
+	char		*query;			/* query string */
+	unsigned int num_fields;	/* how many fields the query returns */
 } MySQLFdwExecutionState;
 
 /*
