@@ -574,9 +574,7 @@ mysqlBeginForeignScan(ForeignScanState *node, int eflags)
 static TupleTableSlot *
 mysqlIterateForeignScan(ForeignScanState *node)
 {
-	HeapTuple		tuple;
 	MYSQL_ROW		row;
-	char		  **values = NULL; /* make compiler happy */
 
 	MySQLFdwExecutionState *festate = (MySQLFdwExecutionState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
@@ -612,7 +610,6 @@ mysqlIterateForeignScan(ForeignScanState *node)
 		 * allocate our pointer array accordingly
 		 */
 		festate->num_fields = mysql_num_fields(festate->result);
-		values = (char **) palloc(festate->num_fields * sizeof(char *));
 	}
 
 	/*
@@ -626,21 +623,30 @@ mysqlIterateForeignScan(ForeignScanState *node)
 	/* Get the next tuple */
 	if ((row = mysql_fetch_row(festate->result)))
 	{
-		/* Build the tuple */
+		Datum	   *dvalues;
+		bool	   *nulls;
 		unsigned long    *lengths;
 		int				  x;
 
 		lengths = mysql_fetch_lengths(festate->result);
+		dvalues = (Datum *) palloc(festate->num_fields * sizeof(Datum));
+		nulls = (bool *) palloc(festate->num_fields * sizeof(bool));
 
 		for (x = 0; x < festate->num_fields; x++)
 		{
 			if (lengths[x] == 0 && row[x] != NULL)
+			{
 				/* special case empty string */
-				values[x] = "";
+				nulls[x] = false;
+				dvalues[x] = CStringGetTextDatum("");
+			}
 			else
 			{
 				if (pg_verifymbstr(row[x], lengths[x], true))
-					values[x] = row[x];
+				{
+					nulls[x] = false;
+					dvalues[x] = CStringGetTextDatum(row[x]);
+				}
 				else
 				{
 					int			l = pg_encoding_mblen(GetDatabaseEncoding(), row[x]);
@@ -662,16 +668,14 @@ mysqlIterateForeignScan(ForeignScanState *node)
 							 errmsg("invalid byte sequence for encoding \"%s\": %s",
 									GetDatabaseEncodingName(),
 									row[x])));
-					values[x] = NULL;
+					nulls[x] = true;
 				}
 			}
 		}
-		tuple = BuildTupleFromCStrings(
-			TupleDescGetAttInMetadata(node->ss.ss_currentRelation->rd_att),
-			values);
+		slot->tts_isnull = nulls;
+		slot->tts_values = dvalues;
 		ExecStoreVirtualTuple(slot);
 	}
-	pfree(values);
 	return slot;
 }
 
