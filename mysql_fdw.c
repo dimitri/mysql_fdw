@@ -610,7 +610,12 @@ mysqlIterateForeignScan(ForeignScanState *node)
 		festate->num_fields = mysql_num_fields(festate->result);
 	}
 
-	/* Cleanup */
+	/*
+	 * The protocol for loading a virtual tuple into a slot is first
+	 * ExecClearTuple, then fill the values/isnull arrays, then
+	 * ExecStoreVirtualTuple.  If we don't find another row in the file, we
+	 * just skip the last step, leaving the slot empty as required.
+	 */
 	ExecClearTuple(slot);
 
 	/* Get the next tuple */
@@ -658,13 +663,10 @@ mysqlIterateForeignScan(ForeignScanState *node)
 				}
 			}
 		}
-
 		tuple = BuildTupleFromCStrings(
 			TupleDescGetAttInMetadata(node->ss.ss_currentRelation->rd_att),
 			values);
-		ExecStoreTuple(tuple, slot, InvalidBuffer, false);
-
-		pfree(values);
+		ExecStoreVirtualTuple(slot);
 	}
 	return slot;
 }
