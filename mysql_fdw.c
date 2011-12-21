@@ -576,6 +576,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 {
 	HeapTuple		tuple;
 	MYSQL_ROW		row;
+	char		  **values = NULL; /* make compiler happy */
 
 	MySQLFdwExecutionState *festate = (MySQLFdwExecutionState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
@@ -607,7 +608,11 @@ mysqlIterateForeignScan(ForeignScanState *node)
 					(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 					 errmsg("failed to execute the MySQL query: %s", err)));
 		}
+		/* remember the field count, that doesn't change mid-query, and
+		 * allocate our pointer array accordingly
+		 */
 		festate->num_fields = mysql_num_fields(festate->result);
+		values = (char **) palloc(festate->num_fields * sizeof(char *));
 	}
 
 	/*
@@ -623,11 +628,9 @@ mysqlIterateForeignScan(ForeignScanState *node)
 	{
 		/* Build the tuple */
 		unsigned long    *lengths;
-		char			**values;
 		int				  x;
 
 		lengths = mysql_fetch_lengths(festate->result);
-		values = (char **) palloc(festate->num_fields * sizeof(char *));
 
 		for (x = 0; x < festate->num_fields; x++)
 		{
@@ -668,6 +671,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 			values);
 		ExecStoreVirtualTuple(slot);
 	}
+	pfree(values);
 	return slot;
 }
 
