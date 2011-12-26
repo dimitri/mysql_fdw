@@ -41,6 +41,7 @@
 #include "miscadmin.h"
 #include "mb/pg_wchar.h"
 #include "optimizer/cost.h"
+#include "parser/parse_coerce.h"
 #include "storage/fd.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -444,6 +445,7 @@ mysqlPlanForeignScan(Oid foreigntableid, PlannerInfo *root, RelOptInfo *baserel)
 	}
 
 	/*
+	 * http://dev.mysql.com/doc/refman/5.0/en/mysql-use-result.html
 	 * http://dev.mysql.com/doc/refman/5.0/en/null-mysql-store-result.html
 	 *
 	 * We assume we're given a query that does return data (SELECT).
@@ -567,6 +569,51 @@ mysqlBeginForeignScan(ForeignScanState *node, int eflags)
 }
 
 /*
+ * mysqlVerifymbstr
+ *
+ * We don't trust MySQL to implement the PostgreSQL encoding names exactly the
+ * same (I guess that would depend also on the MySQL server's version), so we
+ * recheck that here before we go to store the value in the TupleStore.
+ *
+ * Note that we only call that function when we have a column whose type
+ * category is some string.
+ *
+ * Instead of erroring out when the data is not compliant with the database
+ * encoding, we raise a WARNING and return false here, and return NULL at the
+ * upper level, so that it's still possible to use this driver for MySQL data
+ * migrations.
+ *
+ * FIXME: a way to export this choice as a SERVER options might be good.
+ */
+static bool
+mysqlVerifymbstr(const char *mbstr, int len)
+{
+	if (!pg_verifymbstr(mbstr, len, true))
+	{
+		int			l = pg_encoding_mblen(GetDatabaseEncoding(), mbstr);
+		char		buf[8 * 5 + 1];
+		char	   *p = buf;
+		int			j, jlimit;
+
+		jlimit = Min(l, len);
+		jlimit = Min(jlimit, 8);	/* prevent buffer overrun */
+
+		for (j = 0; j < jlimit; j++)
+		{
+			p += sprintf(p, "0x%02x", (unsigned char) mbstr[j]);
+			if (j < jlimit - 1)
+				p += sprintf(p, " ");
+		}
+		ereport(WARNING,
+				(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+				 errmsg("invalid byte sequence for encoding \"%s\": %s",
+						GetDatabaseEncodingName(),
+						mbstr)));
+		return false;
+	}
+	return true;
+}
+/*
  * mysqlIterateForeignScan
  *		Read next record from the data file and store it into the
  *		ScanTupleSlot as a virtual tuple
@@ -594,6 +641,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 		}
 
 		/*
+		 * http://dev.mysql.com/doc/refman/5.0/en/mysql-use-result.html
 		 * http://dev.mysql.com/doc/refman/5.0/en/null-mysql-store-result.html
 		 *
 		 * We assume we're given a query that does return data (SELECT).
@@ -608,17 +656,16 @@ mysqlIterateForeignScan(ForeignScanState *node)
 					(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
 					 errmsg("failed to execute the MySQL query: %s", err)));
 		}
-		/* remember the field count, that doesn't change mid-query, and
-		 * allocate our pointer array accordingly
-		 */
+
+		/* remember the field count, that doesn't change mid-query */
 		festate->num_fields = mysql_num_fields(festate->result);
 	}
 
 	/*
 	 * The protocol for loading a virtual tuple into a slot is first
 	 * ExecClearTuple, then fill the values/isnull arrays, then
-	 * ExecStoreVirtualTuple.  If we don't find another row in the file, we
-	 * just skip the last step, leaving the slot empty as required.
+	 * ExecStoreVirtualTuple. If we don't find another row, we just skip the
+	 * last step, leaving the slot empty as required.
 	 */
 	ExecClearTuple(slot);
 
@@ -630,15 +677,17 @@ mysqlIterateForeignScan(ForeignScanState *node)
 		unsigned long    *lengths;
 		int				  x, y;
 
-		lengths = mysql_fetch_lengths(festate->result);
-		dvalues = (Datum *) palloc(festate->num_fields * sizeof(Datum));
 		nulls = (bool *) palloc(festate->num_fields * sizeof(bool));
+		dvalues = (Datum *) palloc(festate->num_fields * sizeof(Datum));
+		lengths = mysql_fetch_lengths(festate->result);
 
 		for (x = y = 0; x < festate->num_fields; x++, y++)
 		{
 			/* Handle dropped attributes by setting to NULL */
-			if (meta->tupdesc->attrs[y]->attisdropped)
+			while (meta->tupdesc->attrs[y]->attisdropped)
 			{
+				elog(NOTICE, "attisdropped[%d]", y);
+
 				dvalues[y] = (Datum) 0;
 				nulls[y] = true;
 				y++;
@@ -652,7 +701,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 			}
 			else if (lengths[x] == 0)
 			{
-				/* special case empty string */
+				/* special case empty string input */
 				nulls[y] = false;
 				dvalues[y] = InputFunctionCall(&meta->attinfuncs[y],
 											   "",
@@ -661,38 +710,22 @@ mysqlIterateForeignScan(ForeignScanState *node)
 			}
 			else
 			{
-				if (pg_verifymbstr(row[x], lengths[x], true))
+				bool encoding_error = false;
+				if (TypeCategory(meta->attioparams[y]) == TYPCATEGORY_STRING)
+					encoding_error = mysqlVerifymbstr(row[x], lengths[x]);
+
+				if (encoding_error)
+				{
+					nulls[y] = true;
+					dvalues[y] = (Datum) 0;
+				}
+				else
 				{
 					nulls[y] = false;
 					dvalues[y] = InputFunctionCall(&meta->attinfuncs[y],
 												   row[x],
 												   meta->attioparams[y],
 												   meta->atttypmods[y]);
-				}
-				else
-				{
-					int			l = pg_encoding_mblen(GetDatabaseEncoding(), row[x]);
-					char		buf[8 * 5 + 1];
-					char	   *p = buf;
-					int			j, jlimit;
-
-					jlimit = Min(l, lengths[x]);
-					jlimit = Min(jlimit, 8);	/* prevent buffer overrun */
-
-					for (j = 0; j < jlimit; j++)
-					{
-						p += sprintf(p, "0x%02x", (unsigned char) row[x][j]);
-						if (j < jlimit - 1)
-							p += sprintf(p, " ");
-					}
-					ereport(WARNING,
-							(errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
-							 errmsg("invalid byte sequence for encoding \"%s\": %s",
-									GetDatabaseEncodingName(),
-									row[x])));
-
-					dvalues[y] = (Datum) 0;
-					nulls[y] = true;
 				}
 			}
 		}
