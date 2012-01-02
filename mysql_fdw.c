@@ -712,7 +712,7 @@ mysqlIterateForeignScan(ForeignScanState *node)
 			{
 				bool encoding_error = false;
 				if (TypeCategory(meta->attioparams[y]) == TYPCATEGORY_STRING)
-					encoding_error = mysqlVerifymbstr(row[x], lengths[x]);
+					encoding_error = ! mysqlVerifymbstr(row[x], lengths[x]);
 
 				if (encoding_error)
 				{
